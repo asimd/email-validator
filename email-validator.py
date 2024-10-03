@@ -6,6 +6,8 @@ import concurrent.futures
 from typing import Tuple, List, Optional
 from dataclasses import dataclass
 import socket
+import smtplib
+import ssl
 
 @dataclass
 class ValidationResult:
@@ -26,7 +28,7 @@ def validate_email_format(email: str) -> bool:
 def check_domain_mx(domain: str) -> Tuple[bool, str, Optional[str]]:
     try:
         records = dns.resolver.resolve(domain, 'MX')
-        mx_record = str(records[0].exchange)
+        mx_record = str(records[0].exchange).rstrip('.')
         return True, f"MX record found: {mx_record}", mx_record
     except dns.resolver.NXDOMAIN:
         return False, f"Domain {domain} does not exist", None
@@ -41,12 +43,56 @@ def check_domain_mx(domain: str) -> Tuple[bool, str, Optional[str]]:
     except Exception as e:
         return False, f"Error querying DNS for {domain}: {str(e)}", None
 
-def check_smtp_connection(mx_record: str) -> bool:
+def clean_error_message(message: str) -> str:
+    # Remove the "Please try" part and everything after it
+    cleaned = re.sub(r'Please try.*', '', message, flags=re.DOTALL)
+    # Remove any remaining newlines and extra spaces
+    cleaned = ' '.join(cleaned.split())
+    return cleaned
+
+def check_smtp_connection(mx_record: str, email: str) -> Tuple[bool, str, int]:
+    sender_email = "john@gmail.com"  # Use a real email you control
     try:
-        with socket.create_connection((mx_record, 25), timeout=5):
-            return True
-    except:
-        return False
+        # Try STARTTLS on port 587 first
+        context = ssl.create_default_context()
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+
+        with smtplib.SMTP(mx_record, 587, timeout=10) as server:
+            server.ehlo('gmail.com')
+            if server.has_extn('STARTTLS'):
+                server.starttls(context=context)
+                server.ehlo()
+            server.mail(sender_email)
+            code, message = server.rcpt(email)
+            if code == 250:
+                return True, "SMTP server accepted the email address", 50
+            else:
+                return False, clean_error_message(message.decode()), 0
+    except Exception as e:
+        # If STARTTLS fails, try a direct SSL connection on port 465
+        try:
+            with smtplib.SMTP_SSL(mx_record, 465, context=context, timeout=10) as server:
+                server.ehlo('your_server_name.com')
+                server.mail(sender_email)
+                code, message = server.rcpt(email)
+                if code == 250:
+                    return True, "SMTP server accepted the email address (SSL)", 50
+                else:
+                    return False, clean_error_message(message.decode()), 0
+        except Exception as e2:
+            # If both methods fail, try a plain connection on port 25
+            try:
+                with smtplib.SMTP(mx_record, 25, timeout=10) as server:
+                    server.ehlo('gmail.com')
+                    server.mail(sender_email)
+                    code, message = server.rcpt(email)
+                    if code == 250:
+                        return True, "SMTP server accepted the email address (plain)", 50
+                    else:
+                        return False, clean_error_message(message.decode()), 0
+            except Exception as e3:
+                return False, f"Error connecting to SMTP server: STARTTLS: {str(e)}, SSL: {str(e2)}, Plain: {str(e3)}", 0
 
 def verify_email(email: str) -> Tuple[bool, int, str, str]:
     if not validate_email_format(email):
@@ -59,19 +105,22 @@ def verify_email(email: str) -> Tuple[bool, int, str, str]:
     notes = []
 
     if is_valid:
-        confidence_score += 50
+        confidence_score += 25
         notes.append("Domain has valid DNS records")
         
         if mx_record:
             confidence_score += 25
             notes.append("MX record found")
             
-            smtp_connectable = check_smtp_connection(mx_record)
+            smtp_connectable, smtp_message, smtp_score = check_smtp_connection(mx_record, email)
+            confidence_score += smtp_score
             if smtp_connectable:
-                confidence_score += 25
-                notes.append("SMTP server responding")
+                notes.append("SMTP server accepted the email address")
             else:
-                notes.append("SMTP server not responding")
+                notes.append(f"SMTP check failed: {smtp_message}")
+                if "does not exist" in smtp_message.lower():
+                    confidence_score = 0
+                    is_valid = False
         else:
             notes.append("No MX record, using A record")
     
@@ -124,20 +173,26 @@ def validate_emails_from_file(input_file: str, output_file: str, max_workers: in
     except IOError as e:
         logging.error(f"Error writing to output file: {e}")
 
-    print("\nDisclaimer: Email validation without sending an actual email is inherently limited. "
-          "These results are based on DNS and SMTP checks and do not guarantee deliverability.")
+def validate_single_email(email: str):
+    is_valid, confidence_score, error_message, notes = verify_email(email)
+    status = "Valid" if is_valid else "Invalid"
+    print(f"Email: {email}")
+    print(f"Status: {status}")
+    print(f"Confidence Score: {confidence_score}%")
+    print(f"Notes: {notes}")
+    print(f"Error Message: {error_message}")
 
 def print_usage():
     print("Usage:")
     print("  For single email validation:")
     print("    python email_validator.py --single <email_address>")
     print("  For file validation:")
-    print("    python email_validator.py --file <input_file> <output_file>")
+    print("    python email_validator.py --file <input_file> [output_file]")
 
 if __name__ == "__main__":
     setup_logging()
 
-    if len(sys.argv) < 3:
+    if len(sys.argv) < 2:
         print_usage()
         sys.exit(1)
 
@@ -150,10 +205,14 @@ if __name__ == "__main__":
         email = sys.argv[2]
         validate_single_email(email)
     elif mode == "--file":
-        if len(sys.argv) != 4:
+        if len(sys.argv) == 3:
+            input_file = sys.argv[2]
+            output_file = "results.txt"
+        elif len(sys.argv) == 4:
+            input_file, output_file = sys.argv[2], sys.argv[3]
+        else:
             print_usage()
             sys.exit(1)
-        input_file, output_file = sys.argv[2], sys.argv[3]
         validate_emails_from_file(input_file, output_file)
     else:
         print_usage()
