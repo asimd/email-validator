@@ -16,7 +16,7 @@ A Python script for validating email addresses using DNS and SMTP checks, provid
 ## Installation
 1. Clone this repository:
    ```
-   git clone https://github.com/yourusername/email-validator.git
+   git clone https://github.com/asimd/email-validator.git
    cd email-validator
    ```
 2. Install the required dependencies:
