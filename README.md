@@ -1,6 +1,6 @@
-# Email Validator
+# EmailSherlock 🕵️‍♂️📧
 
-A Python script for validating email addresses using DNS and SMTP checks, providing a confidence score for each email's validity and potential deliverability.
+EmailSherlock is a powerful Python tool for validating email addresses using DNS and SMTP checks. It provides a confidence score for each email's validity and potential deliverability, helping you deduce the legitimacy of email addresses with detective-like precision.
 
 ## Features
 
@@ -10,66 +10,84 @@ A Python script for validating email addresses using DNS and SMTP checks, provid
 - Provides a confidence score (0-100%) for each email
 - Handles both single email validation and bulk validation from a file
 - Multi-threaded for improved performance with large datasets
-- Cleaner error messages without unnecessary instructions
-- Default output file for bulk validation
-
-## Requirements
-
-- Python 3.7+
-- dnspython library
+- Verbose mode for detailed output
 
 ## Installation
 
-1. Clone this repository:
-   ```
-   git clone https://github.com/asimd/email-validator.git
-   cd email-validator
-   ```
-2. Install the required dependencies:
-   ```
-   pip install -r requirements.txt
-   ```
+You can install EmailSherlock using pip:
+
+```bash
+pip install emailsherlock
+```
 
 ## Usage
 
-### Single Email Validation
+### Command Line Interface
 
-To validate a single email address:
-```
-python email_validator.py --single email@example.com
-```
+1. Validate a single email:
 
-### Bulk Email Validation from File
-
-To validate multiple email addresses from a file:
-```
-python email_validator.py --file input_file.txt
+```bash
+emailsherlock --single example@email.com
 ```
 
-This will read from `input_file.txt` and write results to `results.txt` (default output file).
+2. Validate emails from a file:
 
-To specify both input and output files:
-```
-python email_validator.py --file input_file.txt custom_output.csv
+```bash
+emailsherlock --file input_emails.txt --output results.csv
 ```
 
-The input file should contain one email address per line. If you want to include additional information (like a school name), use a comma to separate it from the email:
+3. Use verbose mode for detailed output:
+
+```bash
+emailsherlock --single example@email.com -v
 ```
-email1@example.com
-email2@example.com
-School Name,email3@example.com
+
+### Python API
+
+You can also use EmailSherlock in your Python scripts:
+
+```python
+from emailsherlock import validate_single_email, validate_emails_from_file
+
+# Validate a single email
+validate_single_email("example@email.com", verbose=True)
+
+# Validate emails from a file
+validate_emails_from_file("input_emails.txt", "results.csv", verbose=True)
 ```
+
+### Running Manually
+
+If you've cloned the repository or downloaded the source code, you can run EmailSherlock manually without installation:
+
+1. Navigate to the project directory:
+
+```bash
+cd path/to/emailsherlock
+```
+
+2. Run the script directly:
+
+```bash
+python emailsherlock.py --single example@email.com
+```
+
+or
+
+```bash
+python emailsherlock.py --file input_emails.txt --output results.csv
+```
+
+Make sure you have the required dependencies installed (`dnspython`) before running the script manually.
 
 ## Output
 
-The script will generate a CSV file with the following columns:
+The script generates a CSV file with the following columns:
 - Email
 - School (if provided in the input)
 - Valid (True/False)
 - Confidence Score (0-100%)
 - Notes
-
-Additionally, a disclaimer about the limitations of email validation will be included at the top of the output file.
 
 ## Confidence Score Explanation
 
@@ -79,13 +97,9 @@ Additionally, a disclaimer about the limitations of email validation will be inc
 - 25%: Valid format and DNS records, but no MX records and unresponsive SMTP server
 - 0%: Invalid format, no valid DNS records, or explicitly rejected by SMTP server
 
-## Error Messages
-
-The script now provides cleaner error messages, removing unnecessary instructions and links that were previously included in SMTP server responses.
-
 ## Limitations
 
-This tool provides an estimate of email validity based on DNS and SMTP checks. However, it cannot guarantee that an email address is actually in use or will successfully receive emails. The only way to be certain is to send an actual email and confirm receipt.
+EmailSherlock provides an estimate of email validity based on DNS and SMTP checks. However, it cannot guarantee that an email address is actually in use or will successfully receive emails. The only way to be certain is to send an actual email and confirm receipt.
 
 ## Contributing
 
@@ -95,8 +109,14 @@ Contributions are welcome! Please feel free to submit a Pull Request.
 
 This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
 
-## Support the Project
+## Support
 
-If you find this tool useful, you can buy me a coffee:
+If you encounter any issues or have questions, please [open an issue](https://github.com/yourusername/emailsherlock/issues) on GitHub.
 
-[![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://buymeacoffee.com/asimd)
+## Buy Me a Coffee
+
+If you find EmailSherlock useful and want to support its development, you can buy me a coffee:
+
+[![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/asimd)
+
+Your support is greatly appreciated and helps maintain and improve EmailSherlock!

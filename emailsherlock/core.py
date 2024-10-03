@@ -1,4 +1,3 @@
-import sys
 import re
 import dns.resolver
 import logging
@@ -8,6 +7,7 @@ from dataclasses import dataclass
 import socket
 import smtplib
 import ssl
+import random
 
 @dataclass
 class ValidationResult:
@@ -18,8 +18,8 @@ class ValidationResult:
     error_message: str = ""
     notes: str = ""
 
-def setup_logging():
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+def setup_logging(log_level=logging.INFO):
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(message)s')
 
 def validate_email_format(email: str) -> bool:
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
@@ -28,8 +28,8 @@ def validate_email_format(email: str) -> bool:
 def check_domain_mx(domain: str) -> Tuple[bool, str, Optional[str]]:
     try:
         records = dns.resolver.resolve(domain, 'MX')
-        mx_record = str(records[0].exchange).rstrip('.')
-        return True, f"MX record found: {mx_record}", mx_record
+        mx_records = [str(r.exchange).rstrip('.') for r in records]
+        return True, f"MX records found: {', '.join(mx_records)}", mx_records[0]
     except dns.resolver.NXDOMAIN:
         return False, f"Domain {domain} does not exist", None
     except dns.resolver.NoAnswer:
@@ -44,62 +44,56 @@ def check_domain_mx(domain: str) -> Tuple[bool, str, Optional[str]]:
         return False, f"Error querying DNS for {domain}: {str(e)}", None
 
 def clean_error_message(message: str) -> str:
-    # Remove the "Please try" part and everything after it
     cleaned = re.sub(r'Please try.*', '', message, flags=re.DOTALL)
-    # Remove any remaining newlines and extra spaces
     cleaned = ' '.join(cleaned.split())
     return cleaned
 
 def check_smtp_connection(mx_record: str, email: str) -> Tuple[bool, str, int]:
-    sender_email = "john@gmail.com"  # Use a real email you control
-    try:
-        # Try STARTTLS on port 587 first
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
-
-        with smtplib.SMTP(mx_record, 587, timeout=10) as server:
-            server.ehlo('gmail.com')
-            if server.has_extn('STARTTLS'):
-                server.starttls(context=context)
-                server.ehlo()
-            server.mail(sender_email)
-            code, message = server.rcpt(email)
-            if code == 250:
-                return True, "SMTP server accepted the email address", 50
-            else:
-                return False, clean_error_message(message.decode()), 0
-    except Exception as e:
-        # If STARTTLS fails, try a direct SSL connection on port 465
+    sender_email = f"verify_{random.randint(1000, 9999)}@example.com"
+    ports_to_try = [(587, 'STARTTLS'), (465, 'SSL'), (25, 'Plain')]
+    
+    for port, connection_type in ports_to_try:
         try:
-            with smtplib.SMTP_SSL(mx_record, 465, context=context, timeout=10) as server:
-                server.ehlo('your_server_name.com')
-                server.mail(sender_email)
-                code, message = server.rcpt(email)
-                if code == 250:
-                    return True, "SMTP server accepted the email address (SSL)", 50
-                else:
-                    return False, clean_error_message(message.decode()), 0
-        except Exception as e2:
-            # If both methods fail, try a plain connection on port 25
-            try:
-                with smtplib.SMTP(mx_record, 25, timeout=10) as server:
-                    server.ehlo('gmail.com')
-                    server.mail(sender_email)
-                    code, message = server.rcpt(email)
-                    if code == 250:
-                        return True, "SMTP server accepted the email address (plain)", 50
-                    else:
-                        return False, clean_error_message(message.decode()), 0
-            except Exception as e3:
-                return False, f"Error connecting to SMTP server: STARTTLS: {str(e)}, SSL: {str(e2)}, Plain: {str(e3)}", 0
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
 
-def verify_email(email: str) -> Tuple[bool, int, str, str]:
+            if connection_type == 'SSL':
+                with smtplib.SMTP_SSL(mx_record, port, context=context, timeout=10) as server:
+                    return check_rcpt(server, sender_email, email)
+            else:
+                with smtplib.SMTP(mx_record, port, timeout=10) as server:
+                    if connection_type == 'STARTTLS' and server.has_extn('STARTTLS'):
+                        server.starttls(context=context)
+                    return check_rcpt(server, sender_email, email)
+        except Exception as e:
+            continue
+    
+    return False, f"Error connecting to SMTP server on all ports", 0
+
+def check_rcpt(server, sender_email, email):
+    server.ehlo('example.com')
+    server.mail(sender_email)
+    code, message = server.rcpt(email)
+    if code == 250:
+        return True, "SMTP server accepted the email address", 50
+    else:
+        return False, clean_error_message(message.decode()), 0
+
+def verify_email(email: str, verbose: bool = False) -> Tuple[bool, int, str, str]:
+    if verbose:
+        logging.debug(f"Verifying email: {email}")
+    
     if not validate_email_format(email):
+        if verbose:
+            logging.debug(f"Invalid email format: {email}")
         return False, 0, "Invalid email format", ""
 
     domain = email.split('@')[1]
     is_valid, message, mx_record = check_domain_mx(domain)
+    
+    if verbose:
+        logging.debug(f"Domain check result: {message}")
     
     confidence_score = 0
     notes = []
@@ -124,9 +118,12 @@ def verify_email(email: str) -> Tuple[bool, int, str, str]:
         else:
             notes.append("No MX record, using A record")
     
+    if verbose:
+        logging.debug(f"Verification result: Valid: {is_valid}, Confidence: {confidence_score}%, Notes: {'; '.join(notes)}")
+    
     return is_valid, confidence_score, message, "; ".join(notes)
 
-def process_line(line: str) -> ValidationResult:
+def process_line(line: str, verbose: bool = False) -> ValidationResult:
     parts = line.strip().split(',')
     if len(parts) == 2:
         school, email = parts
@@ -135,10 +132,27 @@ def process_line(line: str) -> ValidationResult:
     else:
         return ValidationResult(email="", school=None, is_valid=False, confidence_score=0, error_message="Invalid input format")
     
-    is_valid, confidence_score, error_message, notes = verify_email(email)
+    is_valid, confidence_score, error_message, notes = verify_email(email, verbose)
     return ValidationResult(email, school, is_valid, confidence_score, error_message, notes)
 
-def validate_emails_from_file(input_file: str, output_file: str, max_workers: int = 10):
+def validate_single_email(email: str, verbose: bool = False):
+    is_valid, confidence_score, error_message, notes = verify_email(email, verbose)
+    status = "Valid" if is_valid else "Invalid"
+    print(f"Email: {email}")
+    print(f"Status: {status}")
+    print(f"Confidence Score: {confidence_score}%")
+    print(f"Notes: {notes}")
+    if error_message:
+        print(f"Error Message: {error_message}")
+    
+    if verbose:
+        logging.debug(f"Verbose output for {email}:")
+        logging.debug(f"Is Valid: {is_valid}")
+        logging.debug(f"Confidence Score: {confidence_score}")
+        logging.debug(f"Notes: {notes}")
+        logging.debug(f"Error Message: {error_message}")
+
+def validate_emails_from_file(input_file: str, output_file: str, max_workers: int = 10, verbose: bool = False):
     try:
         with open(input_file, 'r') as f:
             lines = f.readlines()
@@ -148,7 +162,7 @@ def validate_emails_from_file(input_file: str, output_file: str, max_workers: in
 
     results: List[ValidationResult] = []
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_line = {executor.submit(process_line, line): line for line in lines}
+        future_to_line = {executor.submit(process_line, line, verbose): line for line in lines}
         for future in concurrent.futures.as_completed(future_to_line):
             try:
                 result = future.result()
@@ -172,50 +186,3 @@ def validate_emails_from_file(input_file: str, output_file: str, max_workers: in
         logging.info(f"Results written to {output_file}")
     except IOError as e:
         logging.error(f"Error writing to output file: {e}")
-
-def validate_single_email(email: str):
-    is_valid, confidence_score, error_message, notes = verify_email(email)
-    status = "Valid" if is_valid else "Invalid"
-    print(f"Email: {email}")
-    print(f"Status: {status}")
-    print(f"Confidence Score: {confidence_score}%")
-    print(f"Notes: {notes}")
-    print(f"Error Message: {error_message}")
-
-def print_usage():
-    print("Usage:")
-    print("  For single email validation:")
-    print("    python email_validator.py --single <email_address>")
-    print("  For file validation:")
-    print("    python email_validator.py --file <input_file> [output_file]")
-
-if __name__ == "__main__":
-    setup_logging()
-
-    if len(sys.argv) < 2:
-        print_usage()
-        sys.exit(1)
-
-    mode = sys.argv[1]
-
-    if mode == "--single":
-        if len(sys.argv) != 3:
-            print_usage()
-            sys.exit(1)
-        email = sys.argv[2]
-        validate_single_email(email)
-    elif mode == "--file":
-        if len(sys.argv) == 3:
-            input_file = sys.argv[2]
-            output_file = "results.txt"
-        elif len(sys.argv) == 4:
-            input_file, output_file = sys.argv[2], sys.argv[3]
-        else:
-            print_usage()
-            sys.exit(1)
-        validate_emails_from_file(input_file, output_file)
-    else:
-        print_usage()
-        sys.exit(1)
-
-    logging.info("Email validation completed.")
