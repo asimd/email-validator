@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="emailsherlock",
-    version="0.5.0",
+    version="1.0",
     author="Asim Delalic",
     author_email="delalic.asim@gmail.com",
     description="A powerful email validation tool using DNS and SMTP checks",

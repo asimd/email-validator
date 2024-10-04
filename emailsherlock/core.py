@@ -8,6 +8,8 @@ import socket
 import smtplib
 import ssl
 import random
+import asyncio
+import aiodns
 
 @dataclass
 class ValidationResult:
@@ -25,62 +27,39 @@ def validate_email_format(email: str) -> bool:
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     return re.match(pattern, email) is not None
 
-def check_domain_mx(domain: str) -> Tuple[bool, str, Optional[str]]:
+async def check_domain_mx(domain: str) -> Tuple[bool, str, Optional[str]]:
+    resolver = aiodns.DNSResolver()
     try:
-        records = dns.resolver.resolve(domain, 'MX')
-        mx_records = [str(r.exchange).rstrip('.') for r in records]
+        records = await resolver.query(domain, 'MX')
+        mx_records = [str(r.host).rstrip('.') for r in records]
         return True, f"MX records found: {', '.join(mx_records)}", mx_records[0]
-    except dns.resolver.NXDOMAIN:
-        return False, f"Domain {domain} does not exist", None
-    except dns.resolver.NoAnswer:
+    except aiodns.error.DNSError as e:
+        if e.args[0] == 4:  # NXDOMAIN
+            return False, f"Domain {domain} does not exist", None
+        elif e.args[0] == 1:  # No Answer
+            try:
+                await resolver.query(domain, 'A')
+                return True, f"No MX record, but A record found for {domain}", domain
+            except aiodns.error.DNSError:
+                return False, f"No MX or A records found for {domain}", None
+        else:
+            return False, f"DNS query failed for {domain}: {str(e)}", None
+
+async def check_smtp_connection(mx_record: str, email: str) -> Tuple[bool, str, int]:
+    ports_to_try = [25, 587, 465]
+    for port in ports_to_try:
         try:
-            dns.resolver.resolve(domain, 'A')
-            return True, f"No MX record, but A record found for {domain}", domain
-        except dns.resolver.NoAnswer:
-            return False, f"No MX or A records found for {domain}", None
-    except dns.resolver.NoNameservers:
-        return False, f"DNS query failed for {domain}. Check your network connection or DNS configuration.", None
-    except Exception as e:
-        return False, f"Error querying DNS for {domain}: {str(e)}", None
-
-def clean_error_message(message: str) -> str:
-    cleaned = re.sub(r'Please try.*', '', message, flags=re.DOTALL)
-    cleaned = ' '.join(cleaned.split())
-    return cleaned
-
-def check_smtp_connection(mx_record: str, email: str) -> Tuple[bool, str, int]:
-    sender_email = f"verify_{random.randint(1000, 9999)}@example.com"
-    ports_to_try = [(587, 'STARTTLS'), (465, 'SSL'), (25, 'Plain')]
-    
-    for port, connection_type in ports_to_try:
-        try:
-            context = ssl.create_default_context()
-            context.check_hostname = False
-            context.verify_mode = ssl.CERT_NONE
-
-            if connection_type == 'SSL':
-                with smtplib.SMTP_SSL(mx_record, port, context=context, timeout=10) as server:
-                    return check_rcpt(server, sender_email, email)
-            else:
-                with smtplib.SMTP(mx_record, port, timeout=10) as server:
-                    if connection_type == 'STARTTLS' and server.has_extn('STARTTLS'):
-                        server.starttls(context=context)
-                    return check_rcpt(server, sender_email, email)
-        except Exception as e:
+            _, writer = await asyncio.wait_for(asyncio.open_connection(mx_record, port), timeout=5)
+            writer.close()
+            await writer.wait_closed()
+            return True, "SMTP server connection successful", 50
+        except (asyncio.TimeoutError, ConnectionRefusedError):
             continue
-    
-    return False, f"Error connecting to SMTP server on all ports", 0
+        except Exception as e:
+            return False, f"Error connecting to SMTP server: {str(e)}", 0
+    return False, "Unable to connect to SMTP server on any port", 0
 
-def check_rcpt(server, sender_email, email):
-    server.ehlo('example.com')
-    server.mail(sender_email)
-    code, message = server.rcpt(email)
-    if code == 250:
-        return True, "SMTP server accepted the email address", 50
-    else:
-        return False, clean_error_message(message.decode()), 0
-
-def verify_email(email: str, verbose: bool = False) -> Tuple[bool, int, str, str]:
+async def verify_email(email: str, verbose: bool = False) -> Tuple[bool, int, str, str]:
     if verbose:
         logging.debug(f"Verifying email: {email}")
     
@@ -90,7 +69,7 @@ def verify_email(email: str, verbose: bool = False) -> Tuple[bool, int, str, str
         return False, 0, "Invalid email format", ""
 
     domain = email.split('@')[1]
-    is_valid, message, mx_record = check_domain_mx(domain)
+    is_valid, message, mx_record = await check_domain_mx(domain)
     
     if verbose:
         logging.debug(f"Domain check result: {message}")
@@ -106,15 +85,12 @@ def verify_email(email: str, verbose: bool = False) -> Tuple[bool, int, str, str
             confidence_score += 25
             notes.append("MX record found")
             
-            smtp_connectable, smtp_message, smtp_score = check_smtp_connection(mx_record, email)
+            smtp_connectable, smtp_message, smtp_score = await check_smtp_connection(mx_record, email)
             confidence_score += smtp_score
             if smtp_connectable:
-                notes.append("SMTP server accepted the email address")
+                notes.append("SMTP server connection successful")
             else:
                 notes.append(f"SMTP check failed: {smtp_message}")
-                if "does not exist" in smtp_message.lower():
-                    confidence_score = 0
-                    is_valid = False
         else:
             notes.append("No MX record, using A record")
     
@@ -123,7 +99,7 @@ def verify_email(email: str, verbose: bool = False) -> Tuple[bool, int, str, str
     
     return is_valid, confidence_score, message, "; ".join(notes)
 
-def process_line(line: str, verbose: bool = False) -> ValidationResult:
+async def process_line(line: str, verbose: bool = False) -> ValidationResult:
     parts = line.strip().split(',')
     if len(parts) == 2:
         school, email = parts
@@ -132,11 +108,12 @@ def process_line(line: str, verbose: bool = False) -> ValidationResult:
     else:
         return ValidationResult(email="", school=None, is_valid=False, confidence_score=0, error_message="Invalid input format")
     
-    is_valid, confidence_score, error_message, notes = verify_email(email, verbose)
+    is_valid, confidence_score, error_message, notes = await verify_email(email, verbose)
     return ValidationResult(email, school, is_valid, confidence_score, error_message, notes)
 
 def validate_single_email(email: str, verbose: bool = False):
-    is_valid, confidence_score, error_message, notes = verify_email(email, verbose)
+    loop = asyncio.get_event_loop()
+    is_valid, confidence_score, error_message, notes = loop.run_until_complete(verify_email(email, verbose))
     status = "Valid" if is_valid else "Invalid"
     print(f"Email: {email}")
     print(f"Status: {status}")
@@ -152,7 +129,7 @@ def validate_single_email(email: str, verbose: bool = False):
         logging.debug(f"Notes: {notes}")
         logging.debug(f"Error Message: {error_message}")
 
-def validate_emails_from_file(input_file: str, output_file: str, max_workers: int = 10, verbose: bool = False):
+async def async_validate_emails_from_file(input_file: str, output_file: str, verbose: bool = False):
     try:
         with open(input_file, 'r') as f:
             lines = f.readlines()
@@ -160,18 +137,68 @@ def validate_emails_from_file(input_file: str, output_file: str, max_workers: in
         logging.error(f"Error reading input file: {e}")
         return
 
-    results: List[ValidationResult] = []
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-        future_to_line = {executor.submit(process_line, line, verbose): line for line in lines}
-        for future in concurrent.futures.as_completed(future_to_line):
-            try:
-                result = future.result()
-                results.append(result)
-                status = "Valid" if result.is_valid else "Invalid"
-                log_message = f"[{status}] [Confidence: {result.confidence_score}%] {result.email} - {result.error_message} {result.notes}"
-                logging.info(log_message)
-            except Exception as e:
-                logging.error(f"Error processing line: {future_to_line[future].strip()} - {str(e)}")
+    tasks = [process_line(line, verbose) for line in lines]
+    results = await asyncio.gather(*tasks)
+
+    try:
+        with open(output_file, "w") as f:
+            f.write("Disclaimer: Email validation without sending an actual email is inherently limited. "
+                    "These results are based on DNS and SMTP checks and do not guarantee deliverability.\n\n")
+            f.write("Email,School,Valid,Confidence Score,Notes\n")
+            for result in results:
+                if result.school:
+                    f.write(f"{result.email},{result.school},{result.is_valid},{result.confidence_score}%,{result.notes}\n")
+                else:
+                    f.write(f"{result.email},N/A,{result.is_valid},{result.confidence_score}%,{result.notes}\n")
+        logging.info(f"Results written to {output_file}")
+    except IOError as e:
+        logging.error(f"Error writing to output file: {e}")
+
+def validate_emails_from_file(input_file: str, output_file: str, max_workers: int = 10, verbose: bool = False):
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(async_validate_emails_from_file(input_file, output_file, verbose))
+
+def validate_emails_from_file(input_file: str, output_file: str, max_workers: int = 10, verbose: bool = False):
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(async_validate_emails_from_file(input_file, output_file, verbose))
+
+async def async_bulk_verify_emails(emails: List[str], verbose: bool = False) -> List[Tuple[bool, int, str, str]]:
+    tasks = [verify_email(email, verbose) for email in emails]
+    return await asyncio.gather(*tasks)
+
+def bulk_verify_emails(emails: List[str], verbose: bool = False) -> List[Tuple[bool, int, str, str]]:
+    loop = asyncio.get_event_loop()
+    return loop.run_until_complete(async_bulk_verify_emails(emails, verbose))
+
+# Helper function to chunk a list
+def chunk_list(lst, chunk_size):
+    return [lst[i:i + chunk_size] for i in range(0, len(lst), chunk_size)]
+
+def validate_emails_from_file_with_progress(input_file: str, output_file: str, chunk_size: int = 100, verbose: bool = False):
+    try:
+        with open(input_file, 'r') as f:
+            lines = f.readlines()
+    except IOError as e:
+        logging.error(f"Error reading input file: {e}")
+        return
+
+    total_emails = len(lines)
+    processed_emails = 0
+    results = []
+
+    for chunk in chunk_list(lines, chunk_size):
+        emails = [line.strip().split(',')[-1] for line in chunk]
+        chunk_results = bulk_verify_emails(emails, verbose)
+        
+        for line, (is_valid, confidence_score, error_message, notes) in zip(chunk, chunk_results):
+            parts = line.strip().split(',')
+            school = parts[0] if len(parts) == 2 else None
+            email = parts[-1]
+            results.append(ValidationResult(email, school, is_valid, confidence_score, error_message, notes))
+
+        processed_emails += len(chunk)
+        progress = (processed_emails / total_emails) * 100
+        print(f"Progress: {progress:.2f}% ({processed_emails}/{total_emails})")
 
     try:
         with open(output_file, "w") as f:
